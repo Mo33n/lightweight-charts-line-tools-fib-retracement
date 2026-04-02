@@ -27,6 +27,10 @@ import {
 	InteractionPhase,
 	ConstraintResult,
 	SnapAxis,
+	getToolCullingState, 
+	OffScreenState,
+	LineToolCullingInfo,
+	getViewportBounds,
 } from 'lightweight-charts-line-tools-core';
 
 import { LineToolFibRetracementPaneView } from '../views/LineToolFibRetracementPaneView';
@@ -390,4 +394,78 @@ export class LineToolFibRetracement<HorzScaleItem> extends BaseLineTool<HorzScal
 
 		return compositeRenderer.hitTest(x, y);
 	}
+
+	/**
+	 * Calculates the Fibonacci tool's visibility using an Area-Based Zone strategy.
+	 * 
+	 * ### Tutorial Note on Fibonacci Area Culling
+	 * Fibonacci tools represent a "Zone of Interest" on the chart. To prevent 
+	 * background fills from "popping" out when the user zooms in between levels, 
+	 * we treat the entire tool as a solid 2D area.
+	 * 
+	 * 1. We identify the Price extremes (the highest and lowest level prices).
+	 * 2. We identify the Time extremes (earliest and latest anchor point).
+	 * 3. We pass this bounding area to the core with the 'isAreaBased' flag.
+	 * 
+	 * This instructs the culling engine to perform a 2D intersection check. 
+	 * It also automatically handles infinite extensions by expanding this 
+	 * zone to the horizon, ensuring visibility even when the anchors 
+	 * are far off-screen.
+	 * 
+	 * @protected
+	 * @override
+	 */
+	protected override updateCullingState(): void {
+		const options = this.options();
+		const points = this.points();
+
+		// 1. Guard: Ensure tool is stable before culling.
+		if (points.length < this.pointsCount || this.isCreating() || this.isEditing()) {
+			this._setIsCulled(false);
+			return;
+		}
+
+		// --- AREA-BASED CULLING START ---
+
+		// 2. Determine the Price Extremes across all configured levels
+		const segmentData = this.getLineSegmentPoints();
+		if (segmentData.length === 0) {
+			this._setIsCulled(false);
+			return;
+		}
+
+		let minP = Infinity;
+		let maxP = -Infinity;
+		for (const segment of segmentData) {
+			minP = Math.min(minP, segment.price);
+			maxP = Math.max(maxP, segment.price);
+		}
+
+		// 3. Determine the Time Extremes from the anchor points
+		const minT = Math.min(points[0].timestamp, points[1].timestamp);
+		const maxT = Math.max(points[0].timestamp, points[1].timestamp);
+
+		// 4. Create two synthetic points representing the corners of the "Zone of Influence"
+		const zonePoints: LineToolPoint[] = [
+			{ timestamp: minT, price: minP },
+			{ timestamp: maxT, price: maxP }
+		];
+
+		// 5. Invoke the Core Culler in Area-Based mode.
+		// This handles the overlap check and infinite extensions in one ultra-fast O(1) step.
+		const cullingState = getToolCullingState(
+			zonePoints, 
+			this, 
+			options.extend, 
+			undefined, 
+			undefined, 
+			true // isAreaBased: true
+		);
+
+		this._setIsCulled(cullingState !== OffScreenState.Visible);
+
+		// --- AREA-BASED CULLING END ---
+	}
+
+
 }

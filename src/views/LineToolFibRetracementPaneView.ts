@@ -16,8 +16,6 @@ import {
 	RectangleRenderer,
 	TextRenderer,
 	AnchorPoint,
-	OffScreenState,
-	getToolCullingState,
 	LineToolOptionsInternal,
 	deepCopy,
 	LineJoin,
@@ -36,7 +34,6 @@ import {
 	ensureNotNull,
 	LineToolPoint,
 	HitTestType,
-	LineToolCullingInfo,
 	TextOptions
 } from 'lightweight-charts-line-tools-core';
 
@@ -209,15 +206,16 @@ export class LineToolFibRetracementPaneView<HorzScaleItem> extends LineToolPaneV
 	}
 
 	/**
-	 * The core update logic. 
+	 * Orchestrates the multi-stage rendering pass for the Fibonacci Retracement.
 	 * 
-	 * This method performs a multi-stage render pass:
-	 * 1. **Data Prep:** Synchronizes the model's calculated levels with the view.
-	 * 2. **Culling:** Performs a robust geometric check against every level line.
-	 * 3. **Level Loop:** Iterates through sorted levels to configure lines, fills, and labels.
+	 * This method performs the following steps:
+	 * 1. **Culling Check:** Queries the Model to see if the tool is off-screen.
+	 * 2. **Data Sync:** Retrieves sorted segment data from the Model.
+	 * 3. **Pixel Mapping:** Converts logical prices to screen Y-coordinates for all levels.
+	 * 4. **Render Loop:** Iterates through configured levels to set up lines, fills, and labels.
 	 *
-	 * @param height - The height of the pane.
-	 * @param width - The width of the pane.
+	 * @param height - The height of the pane in pixels.
+	 * @param width - The width of the pane in pixels.
 	 * @protected
 	 * @override
 	 */
@@ -233,6 +231,15 @@ export class LineToolFibRetracementPaneView<HorzScaleItem> extends LineToolPaneV
 			return;
 		}
 
+		// --- CULLING CHECK ---
+		// We query the pre-calculated state from the Model. 
+		// If the tool is culled, we exit immediately before performing 
+		// any expensive coordinate math or renderer configuration.
+		if (this._tool.isCulled()) {
+			//console.log('fib retracement culled')
+			return;
+		}		
+
 		// 1. Get Calculated Segment Data from Model (Single Source of Truth)
 		// We sort this here to ensure labels/colors align with prices, and we will use THIS array for everything below.
 		const segmentData = model.getLineSegmentPoints().sort((a, b) => b.coeff - a.coeff);
@@ -244,65 +251,21 @@ export class LineToolFibRetracementPaneView<HorzScaleItem> extends LineToolPaneV
 		}
 
 		const [screenP0, screenP1] = this._points;
+		const minScreenX = Math.min(screenP0.x, screenP1.x);
+		const maxScreenX = Math.max(screenP0.x, screenP1.x);
 
-		// Get sorted config to match the sorted segmentData
-		const levelsConfig = options.levels.slice().sort((a, b) => b.coeff - a.coeff);
-
-		// --- CULLING PREPARATION ---
-		const paneDrawingWidth = this._tool.getChartDrawingWidth();
-
-		// CRITICAL FIX: Generate culling points directly from our sorted segmentData.
-		// This removes the redundant call to model.getAllLogicalPointsForCulling() which would recalculate everything.
-		// This flattens the segments into [Start, End, Start, End...]
-		const allLogicalPointsForCulling: LineToolPoint[] = [];
-		for (const segment of segmentData) {
-			allLogicalPointsForCulling.push(segment.start);
-			allLogicalPointsForCulling.push(segment.end);
-		}
-		
-		// Map pre-calculated coordinates
+		// 3. Map logical prices to screen Y-coordinates for all levels
+		// This array is used by the renderers for positioning and text labels.
 		const allDerivedLevelCoordinates: LevelCoordinates[] = segmentData.map(segment => {
 			const price = segment.price;
 			const coordinate = this._series.priceToCoordinate(price);
 			return { price: price, coordinate: coordinate as Coordinate };
 		});
 
-		// Setup Culling Arrays
-		// This tells the culler: "Points 0 & 1 form a line", "Points 2 & 3 form a line", etc.
-		const subSegments: number[][] = [];
-		const numSegments = segmentData.length;
-		for (let i = 0; i < numSegments; i++) {
-			subSegments.push([i * 2, i * 2 + 1]);
-		}
+		// Retrieve drawing width for infinite line extensions
+		const paneDrawingWidth = this._tool.getChartDrawingWidth();
+		const levelsConfig = options.levels.slice().sort((a, b) => b.coeff - a.coeff);
 
-		// Perform Culling Check
-		const cullingInfo: LineToolCullingInfo = { subSegments: subSegments };
-
-		/**
-		 * CULLING PREPARATION & MULTI-SEGMENT CHECK
-		 *
-		 * Fibonacci tools are large and can span far beyond the viewport. To ensure 
-		 * performance while preventing "popping" (the tool disappearing while a 
-		 * level is still visible):
-		 * 
-		 * 1. We flatten every level into a single array of logical points.
-		 * 2. We define `subSegments` where every pair of points forms a level line.
-		 * 3. `getToolCullingState` performs a robust intersection test on every 
-		 *    individual line, accounting for infinite extensions if enabled.
-		 */
-		const cullingState = getToolCullingState(
-			allLogicalPointsForCulling,
-			this._tool as BaseLineTool<HorzScaleItem>,
-			options.extend,
-			undefined,
-			cullingInfo
-		);
-
-		if (cullingState !== OffScreenState.Visible) {
-			//console.log('fib retracement culled')
-			return;
-		}
-		// --- CULLING END ---
 
 		const lineOptions: LineOptions = {
 			...deepCopy(options.line) as any,
@@ -316,16 +279,18 @@ export class LineToolFibRetracementPaneView<HorzScaleItem> extends LineToolPaneV
 			toolDefaultDragCursor: options.defaultDragCursor,
 		};
 
-		// --- RENDER LOOP ---
+		// --- RENDER LOOP: Iterate through sorted levels ---
 		for (let i = 0; i < levelsConfig.length; i++) {
 			const config = levelsConfig[i];
 			const levelData = allDerivedLevelCoordinates[i];
 			const levelPrice = levelData.price;
 			const levelCoord = levelData.coordinate;
 
+			// Skip levels that cannot be mapped to a finite pixel coordinate
 			if (levelCoord === null || !isFinite(levelCoord)) continue;
 
 			// If the user added more levels dynamically, create new renderers now.
+			// Ensure a renderer set exists for this level index
 			if (!this._levelRenderers[i]) {
 				this._levelRenderers[i] = {
 					line: new SegmentRenderer(new HitTestResult(HitTestType.MovePoint)),
@@ -341,12 +306,8 @@ export class LineToolFibRetracementPaneView<HorzScaleItem> extends LineToolPaneV
 			const distanceText = this._calculateDistanceText(config, levelPrice, levelsConfig, allDerivedLevelCoordinates);
 			const labelText = `${config.coeff} (${priceFormatter.format(levelPrice)})${distanceText}`;
 
-			const minX = Math.min(screenP0.x, screenP1.x);
-			const X_left_of_pane = 0 as Coordinate;
-			const X_min_segment = minX as Coordinate;
-
-			const P_TextLeftAnchor = new AnchorPoint(X_left_of_pane, levelCoord, i);
-			const P_TextRightAnchor = new AnchorPoint(X_min_segment, levelCoord, i);
+			const P_TextLeftAnchor = new AnchorPoint(0 as Coordinate, levelCoord, i);
+			const P_TextRightAnchor = new AnchorPoint(minScreenX as Coordinate, levelCoord, i);
 
 			const finalTextOptions: TextOptions = {
 				value: labelText,
@@ -380,9 +341,6 @@ export class LineToolFibRetracementPaneView<HorzScaleItem> extends LineToolPaneV
 			});
 
 			// --- B. Line Segment Setup ---
-			const minScreenX = Math.min(screenP0.x, screenP1.x);
-			const maxScreenX = Math.max(screenP0.x, screenP1.x);
-
 			const lineStart = new AnchorPoint(
 				options.extend.left ? 0 as Coordinate : minScreenX as Coordinate,
 				levelCoord,
