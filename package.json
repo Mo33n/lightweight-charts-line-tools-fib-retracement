@@ -30,18 +30,18 @@
   "author": "difurious",
   "license": "MPL-2.0",
   "peerDependencies": {
-    "lightweight-charts": "^5.1.0"
+    "lightweight-charts": "^5.2.0"
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-terser": "^1.0.0",
     "@rollup/plugin-typescript": "^12.3.0",
-    "lightweight-charts": "^5.1.0",
-    "rollup": "^4.60.1",
-    "typescript": "^6.0.2"
+    "lightweight-charts": "^5.2.0",
+    "rollup": "^4.60.2",
+    "typescript": "^6.0.3"
   },
   "dependencies": {
-    "lightweight-charts-line-tools-core": "file:../lightweight-charts-line-tools-core",
+    "lightweight-charts-line-tools-core": "github:difurious/lightweight-charts-line-tools-core",
     "tslib": "^2.8.1",
     "typedoc": "^0.28.19"
   }
